@@ -1037,7 +1037,15 @@ class QuoteGenerate {
       canvasCtx.drawImage(replyText, replyPosX, replyTextPosY)
     }
 
-    return canvas
+    const mediaInfo = media ? {
+      x: mediaPosX,
+      y: mediaPosY,
+      width: mediaWidth,
+      height: mediaHeight,
+      borderRadius: 5 * scale
+    } : null
+
+    return { canvas, mediaInfo }
   }
 
   normalizeColor (color) {
@@ -1292,7 +1300,7 @@ class QuoteGenerate {
       maxMediaSize = width / 3 * scale
     }
 
-    const quote = this.drawQuote(
+    const quote = await this.drawQuote(
       scale,
       backgroundColorOne, backgroundColorTwo,
       avatarCanvas,

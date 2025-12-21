@@ -1,8 +1,10 @@
 const {
-  QuoteGenerate
+  QuoteGenerate,
+  loadImageFromUrl
 } = require('../utils')
 const { createCanvas, loadImage } = require('canvas')
 const sharp = require('sharp')
+const { isAnimatedMedia, overlayAnimatedMedia, getAnimatedMediaBuffer, extractFirstFrame } = require('../utils/animated-media')
 
 const normalizeColor = (color) => {
   const canvas = createCanvas(0, 0)
@@ -56,6 +58,8 @@ module.exports = async (parm) => {
   const quoteGenerate = new QuoteGenerate(botToken)
 
   const quoteImages = []
+  let animatedMediaData = null
+  let animatedMessageIndex = -1
 
   let backgroundColor = parm.backgroundColor || '//#292232'
   let backgroundColorOne
@@ -78,6 +82,7 @@ module.exports = async (parm) => {
 
   for (const key in parm.messages) {
     const message = parm.messages[key]
+    const messageIndex = parseInt(key)
 
     if (message) {
       // Ensure message has the required structure to prevent errors
@@ -120,6 +125,42 @@ module.exports = async (parm) => {
         }
       }
 
+      let originalMediaUrl = null
+      let animatedInfo = null
+
+      if (message.media && message.media.url) {
+        try {
+          const mediaBuffer = await getAnimatedMediaBuffer(message.media.url)
+          console.log(`媒体检测: buffer长度=${mediaBuffer.length}, 前4字节=${mediaBuffer.slice(0, 4).toString('hex')}`)
+          animatedInfo = isAnimatedMedia(mediaBuffer)
+          console.log(`动画检测结果:`, animatedInfo)
+
+          if (animatedInfo.animated) {
+            originalMediaUrl = message.media.url
+            animatedMediaData = {
+              buffer: mediaBuffer,
+              url: originalMediaUrl,
+              type: animatedInfo.type
+            }
+            animatedMessageIndex = messageIndex
+
+            // 对于 webm/gif 格式，提取第一帧作为静态缩略图
+            if (animatedInfo.type === 'webm' || animatedInfo.type === 'gif') {
+              try {
+                const firstFrameBuffer = await extractFirstFrame(mediaBuffer, animatedInfo.type)
+                const base64Frame = firstFrameBuffer.toString('base64')
+                message.media.url = `data:image/png;base64,${base64Frame}`
+                console.log(`已提取第一帧作为缩略图, size=${firstFrameBuffer.length}`)
+              } catch (frameError) {
+                console.warn('提取第一帧失败:', frameError.message)
+              }
+            }
+          }
+        } catch (error) {
+          console.warn('Error checking animated media:', error.message)
+        }
+      }
+
       try {
         const canvasQuote = await quoteGenerate.generate(
           backgroundColorOne,
@@ -132,7 +173,11 @@ module.exports = async (parm) => {
         )
 
         if (canvasQuote) {
-          quoteImages.push(canvasQuote)
+          quoteImages.push({
+            ...canvasQuote,
+            messageIndex,
+            hasAnimatedMedia: animatedInfo?.animated || false
+          })
         } else {
           console.warn('Failed to generate quote for message, skipping')
         }
@@ -150,14 +195,17 @@ module.exports = async (parm) => {
   }
 
   let canvasQuote
+  let finalMediaInfo = null
+  parm.scale = parseFloat(parm.scale) || 2
 
   if (quoteImages.length > 1) {
     let width = 0
     let height = 0
 
     for (let index = 0; index < quoteImages.length; index++) {
-      if (quoteImages[index].width > width) width = quoteImages[index].width
-      height += quoteImages[index].height
+      const { canvas } = quoteImages[index]
+      if (canvas.width > width) width = canvas.width
+      height += canvas.height
     }
 
     const quoteMargin = 5 * parm.scale
@@ -168,12 +216,25 @@ module.exports = async (parm) => {
     let imageY = 0
 
     for (let index = 0; index < quoteImages.length; index++) {
-      canvasCtx.drawImage(quoteImages[index], 0, imageY)
-      imageY += quoteImages[index].height + quoteMargin
+      const { canvas, mediaInfo, messageIndex } = quoteImages[index]
+      canvasCtx.drawImage(canvas, 0, imageY)
+
+      if (mediaInfo && messageIndex === animatedMessageIndex) {
+        finalMediaInfo = {
+          ...mediaInfo,
+          y: mediaInfo.y + imageY
+        }
+      }
+
+      imageY += canvas.height + quoteMargin
     }
     canvasQuote = canvas
   } else {
-    canvasQuote = quoteImages[0]
+    const { canvas, mediaInfo } = quoteImages[0]
+    canvasQuote = canvas
+    if (mediaInfo && animatedMessageIndex === 0) {
+      finalMediaInfo = mediaInfo
+    }
   }
 
   let quoteImage
@@ -190,8 +251,24 @@ module.exports = async (parm) => {
 
     const imageQuoteSharp = sharp(canvasQuote.toBuffer())
 
-    if (canvasQuote.height > canvasQuote.width) imageQuoteSharp.resize({ height: maxHeight })
-    else imageQuoteSharp.resize({ width: maxWidth })
+    let resizeRatio = 1
+    if (canvasQuote.height > canvasQuote.width) {
+      resizeRatio = maxHeight / canvasQuote.height
+      imageQuoteSharp.resize({ height: maxHeight })
+    } else {
+      resizeRatio = maxWidth / canvasQuote.width
+      imageQuoteSharp.resize({ width: maxWidth })
+    }
+
+    if (finalMediaInfo) {
+      finalMediaInfo = {
+        x: finalMediaInfo.x * resizeRatio,
+        y: finalMediaInfo.y * resizeRatio,
+        width: finalMediaInfo.width * resizeRatio,
+        height: finalMediaInfo.height * resizeRatio,
+        borderRadius: finalMediaInfo.borderRadius * resizeRatio
+      }
+    }
 
     const canvasImage = await loadImage(await imageQuoteSharp.toBuffer())
 
@@ -202,8 +279,24 @@ module.exports = async (parm) => {
 
     const imageSharp = sharp(canvasPadding.toBuffer())
 
-    if (canvasPadding.height >= canvasPadding.width) imageSharp.resize({ height: maxHeight })
-    else imageSharp.resize({ width: maxWidth })
+    let finalResizeRatio = 1
+    if (canvasPadding.height >= canvasPadding.width) {
+      finalResizeRatio = maxHeight / canvasPadding.height
+      imageSharp.resize({ height: maxHeight })
+    } else {
+      finalResizeRatio = maxWidth / canvasPadding.width
+      imageSharp.resize({ width: maxWidth })
+    }
+
+    if (finalMediaInfo) {
+      finalMediaInfo = {
+        x: finalMediaInfo.x * finalResizeRatio,
+        y: finalMediaInfo.y * finalResizeRatio,
+        width: finalMediaInfo.width * finalResizeRatio,
+        height: finalMediaInfo.height * finalResizeRatio,
+        borderRadius: finalMediaInfo.borderRadius * finalResizeRatio
+      }
+    }
 
     if (format === 'png') quoteImage = await imageSharp.png().toBuffer()
     else quoteImage = await imageSharp.webp({ lossless: true, force: true }).toBuffer()
@@ -251,6 +344,16 @@ module.exports = async (parm) => {
 
     // Draw the image to the canvas with padding centered
     canvasPicCtx.drawImage(canvasImage, widthPadding / 2, heightPadding / 2)
+
+    if (finalMediaInfo) {
+      finalMediaInfo = {
+        x: finalMediaInfo.x + widthPadding / 2,
+        y: finalMediaInfo.y + heightPadding / 2,
+        width: finalMediaInfo.width,
+        height: finalMediaInfo.height,
+        borderRadius: finalMediaInfo.borderRadius
+      }
+    }
 
     canvasPicCtx.shadowOffsetX = 0
     canvasPicCtx.shadowOffsetY = 0
@@ -306,7 +409,15 @@ module.exports = async (parm) => {
     const minPadding = 110
 
     // resize canvasImage if it is larger than canvasPic + minPadding
+    let offsetX = 0
+    let offsetY = 0
+    let resizeRatio = 1
+
     if (canvasImage.width > canvasPic.width - minPadding * 2 || canvasImage.height > canvasPic.height - minPadding * 2) {
+      const targetWidth = canvasPic.width - minPadding * 2
+      const targetHeight = canvasPic.height - minPadding * 2
+      resizeRatio = Math.min(targetWidth / canvasImage.width, targetHeight / canvasImage.height)
+
       canvasImage = await sharp(canvasQuote.toBuffer()).resize({
         width: canvasPic.width - minPadding * 2,
         height: canvasPic.height - minPadding * 2,
@@ -322,6 +433,16 @@ module.exports = async (parm) => {
     const imageY = (canvasPic.height - canvasImage.height) / 2
 
     canvasPicCtx.drawImage(canvasImage, imageX, imageY)
+
+    if (finalMediaInfo) {
+      finalMediaInfo = {
+        x: finalMediaInfo.x * resizeRatio + imageX,
+        y: finalMediaInfo.y * resizeRatio + imageY,
+        width: finalMediaInfo.width * resizeRatio,
+        height: finalMediaInfo.height * resizeRatio,
+        borderRadius: finalMediaInfo.borderRadius * resizeRatio
+      }
+    }
 
     canvasPicCtx.shadowOffsetX = 0
     canvasPicCtx.shadowOffsetY = 0
@@ -340,10 +461,40 @@ module.exports = async (parm) => {
     quoteImage = canvasQuote.toBuffer()
   }
 
-  const imageMetadata = await sharp(quoteImage).metadata()
+  if (animatedMediaData && finalMediaInfo) {
+    try {
+      // gif -> gif, webp/webm -> webm (Telegram 贴纸需要 webm 格式)
+      const outputFormat = animatedMediaData.type === 'gif' ? 'gif' : 'webp'
+      const inputFormat = animatedMediaData.type  // webm, webp, gif
+      const result = await overlayAnimatedMedia(
+        quoteImage,
+        animatedMediaData.buffer,
+        finalMediaInfo,
+        outputFormat,
+        inputFormat,
+        backgroundColorOne  // 传递消息框颜色
+      )
+      quoteImage = result.buffer
+      ext = result.format  // 实际输出格式（webm 或 gif）
+      console.log(`动画合成完成: type=${animatedMediaData.type}, input=${inputFormat}, output=${ext}`)
+    } catch (error) {
+      console.error('Error overlaying animated media:', error.message)
+    }
+  }
 
-  const width = imageMetadata.width
-  const height = imageMetadata.height
+  let width, height
+
+  // webm 格式 sharp 无法解析，使用之前的尺寸
+  if (ext === 'webm') {
+    // 使用最终 canvas 的尺寸
+    width = canvasQuote.width
+    height = canvasQuote.height
+    console.log(`webm 格式，使用 canvas 尺寸: ${width}x${height}`)
+  } else {
+    const imageMetadata = await sharp(quoteImage).metadata()
+    width = imageMetadata.width
+    height = imageMetadata.height
+  }
 
   let image
   if (ext) image = quoteImage

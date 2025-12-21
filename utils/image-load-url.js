@@ -27,8 +27,13 @@ function parseDataUri (dataUri) {
 
 module.exports = (url, filter = false) => {
   return new Promise((resolve, reject) => {
-    // Support data URI
-    if (typeof url === 'string' && url.startsWith('data:')) {
+    // Ensure url is a string
+    if (typeof url !== 'string') {
+      return reject(new Error('URL must be a string'))
+    }
+
+    // Support data URI - check this FIRST before other validations
+    if (url.startsWith('data:')) {
       try {
         const { buffer, headers } = parseDataUri(url)
         if (filter && filter(headers)) return resolve(Buffer.concat([]))
@@ -36,6 +41,11 @@ module.exports = (url, filter = false) => {
       } catch (err) {
         return reject(err)
       }
+    }
+
+    // Check if URL is valid HTTPS/HTTP
+    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+      return reject(new Error(`Protocol "${url.split(':')[0]}:" not supported. Expected "https:"`))
     }
 
     const options = new URL(url)
