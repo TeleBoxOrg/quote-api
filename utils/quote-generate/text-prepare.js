@@ -98,6 +98,15 @@ function buildStyledChars (text, entities) {
           : entity.type
 
       if (entity.type === 'custom_emoji') {
+        if (!styledChars[entity.offset]) {
+          console.warn('custom emoji entity offset out of range', {
+            offset: entity.offset,
+            length: entity.length,
+            textLength: text.length,
+            id: entity.custom_emoji_id
+          })
+          continue
+        }
         styledChars[entity.offset].customEmojiId = entity.custom_emoji_id
       }
 

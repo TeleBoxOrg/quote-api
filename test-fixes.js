@@ -5,6 +5,7 @@ const assert = require('assert')
 const { loadImage, createCanvas } = require('canvas')
 const generateMethod = require('./methods/generate')
 const QuoteGenerate = require('./utils/quote-generate')
+const { prepareText } = require('./utils/quote-generate/text-prepare')
 
 // Count opaque pixels in the left avatar column (x < colW) of a PNG buffer.
 function leftColumnInk (img, colW) {
@@ -19,6 +20,32 @@ function leftColumnInk (img, colW) {
 
 async function main () {
   const scale = 2
+
+  // Malformed Telegram custom-emoji entities must not crash preparation or
+  // discard otherwise valid message text. Keep one diagnostic warning.
+  const warnings = []
+  const originalWarn = console.warn
+  console.warn = (...args) => warnings.push(args)
+  let malformedPrepared
+  try {
+    malformedPrepared = await prepareText(
+      'stable text',
+      [{ type: 'custom_emoji', offset: 999, length: 2, custom_emoji_id: 'malformed-offset' }],
+      24,
+      'apple',
+      null
+    )
+  } finally {
+    console.warn = originalWarn
+  }
+  assert.ok(malformedPrepared.segments.length > 0, 'malformed entity must not discard valid text')
+  assert.strictEqual(
+    malformedPrepared.segments.map(segment => segment.text).join(''),
+    'stable text',
+    'malformed entity must leave the source text intact'
+  )
+  assert.strictEqual(warnings.length, 1, 'malformed entity should emit one diagnostic warning')
+
   const msg = (chatId, text) => ({
     chatId,
     avatar: true,
